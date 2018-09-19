@@ -3,7 +3,16 @@ import xml.etree.ElementTree as ET
 import os
 import numpy as np
 from PIL import Image
+import torch
 from pprint import pprint
+import argparse
+from torchvision import transforms
+from skimage.transform import resize
+
+parse = argparse.ArgumentParser()
+parse.add_argument('--caffe_pretrain', type=bool, default=False)
+opt = parse.parse_args()
+
 example_for_xml = 'E:/my_python/dataset/VOC2012/Annotations/2008_001659.xml'
 data_path = 'E:/my_python/dataset/VOC2012'
 
@@ -74,6 +83,51 @@ def voc_xml_read(data_path, img_id, use_diffcult, label_name):
     #     return img, bbox, label, difficult
     return img, bbox, label, difficult
 
+def bbox_resize(bbox, in_size, out_size):
+    bbox = bbox.copy()
+    y_scale = float(out_size[0]) / in_size[0]
+    x_scale = float(out_size[1]) / in_size[1]
+    bbox[:, 0] = y_scale * bbox[:, 0]
+    bbox[:, 2] = y_scale * bbox[:, 2]
+    bbox[:, 1] = x_scale * bbox[:, 1]
+    bbox[:, 3] = x_scale * bbox[:, 3]
+    return bbox
+
+def pytorch_normalze(img):
+    """
+    https://github.com/pytorch/vision/issues/223
+    return appr -1~1 RGB
+    """
+    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                std=[0.229, 0.224, 0.225])
+    img = normalize(torch.from_numpy(img))
+    return img.numpy()
+
+def caffe_normalize(img):
+    """
+    return appr -125-125 BGR
+    """
+    img = img[[2, 1, 0], :, :]  # RGB-BGR
+    img = img * 255
+    mean = np.array([122.7717, 115.9465, 102.9801]).reshape(3, 1, 1)
+    img = (img - mean).astype(np.float32, copy=True)
+    return img
+
+def preprocess(img, opt, min_size=600, max_size=1000):
+    C, H, W = img.shape
+    scale1 = min_size / min(H, W)
+    scale2 = max_size / max(H, W)
+    scale = min(scale1, scale2)
+    img = img / 255.
+    img = resize(img, (C, H * scale, W * scale), mode='reflect', anti_aliasing=False)
+    # both the longer and shorter should be less than
+    # max_size and min_size
+    if opt.caffe_pretrain:
+        normalize = caffe_normalize
+    else:
+        normalize = pytorch_normalze
+    return normalize(img)
+
 class Voc_dataset(Dataset):
 
     def __init__(self, data_dir, split='trainval',
@@ -99,3 +153,22 @@ class Voc_dataset(Dataset):
 
     def __len__(self):
         return len(self.ids)
+
+class My_dataset(Dataset):
+    def __init__(self, datadir, opt):
+        self.voc = Voc_dataset(datadir)
+        self.opt = opt
+
+    def __getitem__(self, item):
+        ori_img, bbox, label, difficult = self.voc[item]
+
+        _, H, W = ori_img.shape
+        img = preprocess(ori_img, self.opt.min_size, self.opt.max_size)
+        _, o_H, o_W = img.shape
+        scale = o_H / H
+        bbox = bbox_resize(bbox, (H, W), (o_H, o_W))
+        # TODO: Using padding image instead of resize
+        return img.copy(), bbox.copy(), label.copy(), scale
+    
+    def __len__(self):
+        return len(self.voc)
